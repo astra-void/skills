@@ -1,0 +1,4 @@
+interface:
+  display_name: "Conventional Commits"
+  short_description: "Draft, split, and auto-commit conventional commits"
+  default_prompt: "Use $conventional-commits to split the current diff by domain, draft Conventional Commit subjects, and commit each group safely."

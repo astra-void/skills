@@ -1,4 +1,4 @@
 interface:
   display_name: "Keep a Changelog"
-  short_description: "Draft and maintain Keep a Changelog files"
-  default_prompt: "Use $keep-a-changelog to inspect the current diff, draft Keep a Changelog entries, and update CHANGELOG.md safely."
+  short_description: "Review and operate Keep a Changelog releases"
+  default_prompt: "Use $keep-a-changelog to inspect the current diff, review changelog quality, and manage CHANGELOG.md release sections safely."

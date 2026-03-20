@@ -7,19 +7,9 @@ import os
 import re
 import subprocess
 import sys
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-
-CATEGORY_ORDER = {
-    "ci": 0,
-    "tooling": 1,
-    "docs": 2,
-    "package": 3,
-    "app": 4,
-    "test": 5,
-    "misc": 6,
-}
 
 STANDARD_CATEGORIES = (
     "Added",
@@ -30,6 +20,19 @@ STANDARD_CATEGORIES = (
     "Security",
 )
 
+CATEGORY_ORDER = {
+    "ci": 0,
+    "tooling": 1,
+    "docs": 2,
+    "package": 3,
+    "app": 4,
+    "area": 5,
+    "test": 6,
+    "misc": 7,
+}
+
+LOW_NOTABILITY_CATEGORIES = {"ci", "tooling", "test"}
+MEDIUM_NOTABILITY_CATEGORIES = {"docs", "area", "misc"}
 ROOT_TOOLING_FILES = {
     "package.json",
     "package-lock.json",
@@ -42,8 +45,9 @@ ROOT_TOOLING_FILES = {
     "lerna.json",
     "biome.json",
     "biome.jsonc",
+    "Makefile",
+    "Dockerfile",
 }
-
 ROOT_TOOLING_PREFIXES = (
     "tsconfig.",
     "eslint.config.",
@@ -56,7 +60,6 @@ ROOT_TOOLING_PREFIXES = (
     "babel.config.",
     "commitlint.config.",
 )
-
 ROOT_TOOLING_DOTFILE_PREFIXES = (
     ".eslintrc",
     ".prettierrc",
@@ -68,20 +71,33 @@ ROOT_TOOLING_DOTFILE_PREFIXES = (
     ".nvmrc",
     ".yarnrc",
 )
-
-ROOT_DOC_FILENAMES = {
-    "README",
-    "CHANGELOG",
-    "LICENSE",
-    "CONTRIBUTING",
-}
-
-ROOT_DOC_SUFFIXES = {
-    ".md",
-    ".mdx",
-    ".rst",
-    ".txt",
-}
+ROOT_DOC_FILENAMES = {"README", "CHANGELOG", "LICENSE", "CONTRIBUTING"}
+ROOT_DOC_SUFFIXES = {".md", ".mdx", ".rst", ".txt"}
+GENERIC_DOC_DIRS = {"docs", "doc", "documentation"}
+GENERIC_TEST_DIRS = {"tests", "test", "spec", "specs"}
+GENERIC_PACKAGE_DIRS = {"packages", "package", "libs", "lib", "modules", "crates", "components", "plugins"}
+GENERIC_APP_DIRS = {"apps", "app", "examples", "example", "demos", "demo", "sites", "site"}
+LOW_SIGNAL_BULLET_PATTERNS = (
+    "refactor",
+    "internal",
+    "cleanup",
+    "clean up",
+    "lint",
+    "format",
+    "test only",
+    "ci",
+    "tooling",
+    "rename",
+    "reorganize",
+    "reorganise",
+    "chore",
+)
+LOW_SIGNAL_DOC_PATTERNS = (
+    "readme",
+    "docs",
+    "documentation",
+    "comment",
+)
 
 SECTION_RE = re.compile(
     r"^## \[(?P<title>[^\]]+)\](?: - (?P<date>\d{4}-\d{2}-\d{2}))?(?P<yanked> \[YANKED\])?$"
@@ -91,7 +107,9 @@ LINK_RE = re.compile(r"^\[(?P<label>[^\]]+)\]:\s*(?P<url>\S+)\s*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 GITHUB_HTTPS_RE = re.compile(r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$")
 GITHUB_SSH_RE = re.compile(r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$")
-COMPARE_RE = re.compile(r"^(?P<base>https://github\.com/[^/]+/[^/]+/compare)/(?P<left>[^.]+)\.\.\.(?P<right>\S+)$")
+COMPARE_RE = re.compile(
+    r"^(?P<base>https://github\.com/[^/]+/[^/]+/compare)/(?P<left>[^.]+)\.\.\.(?P<right>\S+)$"
+)
 
 
 class PlannerError(RuntimeError):
@@ -111,6 +129,8 @@ class Group:
     domain_key: str
     scope_hint: str
     category: str
+    notability: str
+    default_include: bool
     paths: set[str] = field(default_factory=set)
     reasons: set[str] = field(default_factory=set)
 
@@ -119,6 +139,8 @@ class Group:
             "domain_key": self.domain_key,
             "scope_hint": self.scope_hint,
             "category": self.category,
+            "notability": self.notability,
+            "default_include": self.default_include,
             "paths": sorted(self.paths),
             "reason": "; ".join(sorted(self.reasons)),
         }
@@ -276,7 +298,7 @@ def classify_test_domain(
     return "test", "test", "test", f"{source_reason} without a matching package or app"
 
 
-def classify_path(
+def classify_path_lattice(
     path: str,
     package_names: set[str],
     app_names: set[str],
@@ -313,6 +335,63 @@ def classify_path(
             return "docs", "docs", "docs", "root documentation files"
 
     return "misc", "misc", "misc", f"fallback group for unmatched path {path}"
+
+
+def classify_path_generic(path: str) -> tuple[str, str, str, str]:
+    parts = Path(path).parts
+    if not parts:
+        return "misc", "misc", "misc", "fallback group for unmatched paths"
+
+    top = parts[0]
+    name = Path(path).name.lower()
+
+    if top == ".github":
+        return "ci", "ci", "ci", "CI workflow and automation paths"
+
+    if len(parts) == 1:
+        if is_root_tooling_file(path):
+            return "tooling", "tooling", "tooling", "root tooling and config files"
+        if is_root_doc_file(path):
+            return "docs", "docs", "docs", "root documentation files"
+
+    if top.lower() in GENERIC_DOC_DIRS:
+        return "docs", "docs", "docs", f"paths under {top}/"
+
+    if top.lower() in GENERIC_TEST_DIRS or "__tests__" in parts or name.endswith(".spec.ts") or name.endswith(".test.ts"):
+        return "test", "test", "test", f"paths under test-oriented tree {top}"
+
+    if top.lower() in GENERIC_PACKAGE_DIRS and len(parts) >= 2:
+        return parts[1], parts[1], "package", f"paths under {top}/{parts[1]}"
+
+    if top.lower() in GENERIC_APP_DIRS and len(parts) >= 2:
+        return parts[1], parts[1], "app", f"paths under {top}/{parts[1]}"
+
+    if top.startswith("."):
+        return "misc", "misc", "misc", f"fallback group for hidden path {path}"
+
+    if len(parts) >= 2:
+        return top, top, "area", f"paths under {top}/"
+
+    return "misc", "misc", "misc", f"fallback group for unmatched path {path}"
+
+
+def classify_path(
+    profile: str,
+    path: str,
+    package_names: set[str],
+    app_names: set[str],
+) -> tuple[str, str, str, str]:
+    if profile == "lattice":
+        return classify_path_lattice(path, package_names, app_names)
+    return classify_path_generic(path)
+
+
+def compute_notability(category: str) -> tuple[str, bool]:
+    if category in LOW_NOTABILITY_CATEGORIES:
+        return "low", False
+    if category in MEDIUM_NOTABILITY_CATEGORIES:
+        return "medium", category == "area"
+    return "high", True
 
 
 def split_footer_links(lines: list[str]) -> tuple[list[str], OrderedDict[str, str]]:
@@ -379,6 +458,71 @@ def parse_section_body(section: Section, errors: list[str]) -> None:
 
     section.intro_lines = intro_lines
     section.categories = categories
+
+
+def normalize_bullet_text(line: str) -> str:
+    text = line.strip()
+    if text.startswith("- "):
+        text = text[2:]
+    return " ".join(text.lower().split())
+
+
+def is_blank_lines(lines: list[str]) -> bool:
+    return not any(line.strip() for line in lines)
+
+
+def analyze_bullet_quality(section: Section, category: str, line: str) -> list[str]:
+    bullet = normalize_bullet_text(line)
+    if not bullet:
+        return []
+
+    warnings: list[str] = []
+    if any(token in bullet for token in LOW_SIGNAL_BULLET_PATTERNS):
+        warnings.append(
+            f"[{section.title}] bullet under {category} looks internal or low-signal: {line.strip()}"
+        )
+    if any(token in bullet for token in LOW_SIGNAL_DOC_PATTERNS) and category != "Security":
+        warnings.append(
+            f"[{section.title}] bullet under {category} may document docs-only work: {line.strip()}"
+        )
+    if len(bullet.split()) <= 3:
+        warnings.append(f"[{section.title}] bullet under {category} is too terse to explain user impact: {line.strip()}")
+    return warnings
+
+
+def collect_quality_warnings(document: ChangelogDocument) -> list[str]:
+    warnings: list[str] = []
+
+    for section in document.sections:
+        has_intro = not is_blank_lines(section.intro_lines)
+        non_empty_categories = 0
+        seen_bullets: Counter[str] = Counter()
+
+        for category, items in section.categories.items():
+            bullet_lines = [item for item in items if item.strip()]
+            if not bullet_lines:
+                warnings.append(f"[{section.title}] category {category} is empty.")
+                continue
+
+            non_empty_categories += 1
+            for line in bullet_lines:
+                normalized = normalize_bullet_text(line)
+                if normalized:
+                    seen_bullets[normalized] += 1
+                warnings.extend(analyze_bullet_quality(section, category, line))
+
+        for bullet, count in seen_bullets.items():
+            if count > 1:
+                warnings.append(f"[{section.title}] contains duplicate bullet text: {bullet}")
+
+        if section.title == "Unreleased":
+            if not has_intro and non_empty_categories == 0:
+                warnings.append("[Unreleased] is empty.")
+        else:
+            if not has_intro and non_empty_categories == 0:
+                warnings.append(f"[{section.title}] is an empty release section.")
+
+    return warnings
 
 
 def parse_changelog_document(text: str) -> ChangelogDocument:
@@ -487,26 +631,22 @@ def render_section(section: Section) -> list[str]:
         heading += " [YANKED]"
 
     lines = [heading]
-    body: list[str] = []
-    body.extend(section.intro_lines)
+    body: list[str] = list(section.intro_lines)
     while body and not body[-1].strip():
         body.pop()
 
     category_lines: list[str] = []
     for category in STANDARD_CATEGORIES:
         items = section.categories.get(category)
-        if items is None:
+        if not items:
+            continue
+        content = [item for item in items if item.strip()]
+        if not content:
             continue
         if category_lines:
-            while category_lines and category_lines[-1] != "":
-                category_lines.append("")
-        category_lines.append(f"### {category}")
-        content = list(items)
-        while content and not content[-1].strip():
-            content.pop()
-        category_lines.extend(content)
-        if not content:
             category_lines.append("")
+        category_lines.append(f"### {category}")
+        category_lines.extend(content)
 
     if body:
         lines.append("")
@@ -571,10 +711,7 @@ def get_tags(repo: Path) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
-def infer_compare_links(
-    repo: Path,
-    document: ChangelogDocument,
-) -> dict[str, object]:
+def infer_compare_links(repo: Path, document: ChangelogDocument) -> dict[str, object]:
     remote_url = github_repo_url_from_remote(get_origin_remote(repo))
     compare_base = f"{remote_url}/compare" if remote_url else None
     version_titles = [section.title for section in document.sections if section.title != "Unreleased"]
@@ -636,7 +773,25 @@ def infer_compare_links(
     }
 
 
-def build_plan(repo: Path, changelog_arg: str | None = None) -> dict[str, object]:
+def build_release_support(document: ChangelogDocument, compare_links: dict[str, object]) -> dict[str, object]:
+    versions = [section.title for section in document.sections if section.title != "Unreleased"]
+    return {
+        "available_versions": versions,
+        "has_unreleased": document.get_section("Unreleased") is not None,
+        "can_release": document.get_section("Unreleased") is not None and not document.errors,
+        "can_release_subset": document.get_section("Unreleased") is not None and not document.errors,
+        "supports_yank": bool(versions),
+        "compare_links": compare_links,
+    }
+
+
+def build_plan(
+    repo: Path,
+    changelog_arg: str | None = None,
+    *,
+    profile: str = "generic",
+    strict_quality: bool = False,
+) -> dict[str, object]:
     changelog_path = Path(changelog_arg or "CHANGELOG.md")
     if not changelog_path.is_absolute():
         changelog_path = repo / changelog_path
@@ -669,11 +824,18 @@ def build_plan(repo: Path, changelog_arg: str | None = None) -> dict[str, object
             changelog_modified = True
             continue
 
-        domain_key, scope_hint, category, reason = classify_path(entry.path, package_names, app_names)
+        domain_key, scope_hint, category, reason = classify_path(profile, entry.path, package_names, app_names)
+        notability, default_include = compute_notability(category)
         key = (category, domain_key)
         group = groups_by_key.setdefault(
             key,
-            Group(domain_key=domain_key, scope_hint=scope_hint, category=category),
+            Group(
+                domain_key=domain_key,
+                scope_hint=scope_hint,
+                category=category,
+                notability=notability,
+                default_include=default_include,
+            ),
         )
         group.paths.update(path_set)
         group.reasons.add(reason)
@@ -691,13 +853,15 @@ def build_plan(repo: Path, changelog_arg: str | None = None) -> dict[str, object
         document = ChangelogDocument([], [], OrderedDict(), [], ["Missing [Unreleased] section."])
 
     compare_links = infer_compare_links(repo, document)
+    quality_warnings = sorted(set(collect_quality_warnings(document)))
     groups = [group.to_dict() for group in groups_by_key.values()]
     groups.sort(key=lambda group: (CATEGORY_ORDER.get(str(group["category"]), 99), str(group["domain_key"])))
-
     warnings.update(document.warnings)
 
     return {
         "repo_root": str(repo),
+        "profile": profile,
+        "strict_quality": strict_quality,
         "changelog_path": str(changelog_path),
         "changelog_exists": changelog_path.exists(),
         "has_staged_changes": has_staged_changes,
@@ -705,14 +869,19 @@ def build_plan(repo: Path, changelog_arg: str | None = None) -> dict[str, object
         "has_merge_conflicts": has_merge_conflicts,
         "groups": groups,
         "warnings": sorted(warnings),
+        "quality_warnings": quality_warnings,
+        "quality_blocking": bool(strict_quality and quality_warnings),
         "structure": document.to_summary(),
         "compare_links": compare_links,
+        "release_support": build_release_support(document, compare_links),
     }
 
 
 def format_text(plan: dict[str, object]) -> str:
     lines = [
         f"repo_root: {plan['repo_root']}",
+        f"profile: {plan['profile']}",
+        f"strict_quality: {str(plan['strict_quality']).lower()}",
         f"changelog_path: {plan['changelog_path']}",
         f"changelog_exists: {str(plan['changelog_exists']).lower()}",
         f"has_staged_changes: {str(plan['has_staged_changes']).lower()}",
@@ -727,6 +896,15 @@ def format_text(plan: dict[str, object]) -> str:
             lines.append(f"- {warning}")
     else:
         lines.append("- none")
+
+    quality_warnings = plan["quality_warnings"]
+    lines.append("quality_warnings:")
+    if quality_warnings:
+        for warning in quality_warnings:
+            lines.append(f"- {warning}")
+    else:
+        lines.append("- none")
+    lines.append(f"quality_blocking: {str(plan['quality_blocking']).lower()}")
 
     structure = plan["structure"]
     lines.extend(
@@ -752,6 +930,18 @@ def format_text(plan: dict[str, object]) -> str:
             f"- source: {compare_links['source']}",
             f"- compare_base_url: {compare_links['compare_base_url'] or 'none'}",
             f"- tag_prefix: {compare_links['tag_prefix'] if compare_links['tag_prefix'] is not None else 'none'}",
+        ]
+    )
+
+    release_support = plan["release_support"]
+    lines.extend(
+        [
+            "release_support:",
+            f"- available_versions: {', '.join(release_support['available_versions']) or 'none'}",
+            f"- has_unreleased: {str(release_support['has_unreleased']).lower()}",
+            f"- can_release: {str(release_support['can_release']).lower()}",
+            f"- can_release_subset: {str(release_support['can_release_subset']).lower()}",
+            f"- supports_yank: {str(release_support['supports_yank']).lower()}",
             "groups:",
         ]
     )
@@ -763,7 +953,9 @@ def format_text(plan: dict[str, object]) -> str:
 
     for group in groups:
         lines.append(
-            f"- {group['category']} {group['domain_key']} ({group['scope_hint']}): {group['reason']}"
+            f"- {group['category']} {group['domain_key']} ({group['scope_hint']}): "
+            f"notability={group['notability']} default_include={str(group['default_include']).lower()} "
+            f"{group['reason']}"
         )
         for path in group["paths"]:
             lines.append(f"  - {path}")
@@ -774,6 +966,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Plan Keep a Changelog updates from the current git state.")
     parser.add_argument("--repo", help="Repository root or any path inside the repository.")
     parser.add_argument("--changelog", help="Relative or absolute path to the changelog file.")
+    parser.add_argument("--profile", choices=("generic", "lattice"), default="generic")
+    parser.add_argument("--strict-quality", action="store_true")
     parser.add_argument(
         "--format",
         choices=("json", "text"),
@@ -784,7 +978,12 @@ def main() -> int:
 
     try:
         repo = resolve_repo(args.repo)
-        plan = build_plan(repo, args.changelog)
+        plan = build_plan(
+            repo,
+            args.changelog,
+            profile=args.profile,
+            strict_quality=args.strict_quality,
+        )
     except PlannerError as exc:
         print(str(exc), file=sys.stderr)
         return 1

@@ -1,6 +1,6 @@
 # Keep a Changelog 1.1.0 Summary
 
-Use this reference when the request needs exact structure, heading names, date formatting, or footer-link behavior.
+Use this reference when the request needs exact structure, heading names, date formatting, yanked-version rules, or footer-link behavior.
 
 ## Core Structure
 
@@ -28,13 +28,15 @@ Use only the headings that are needed for the current section. Do not invent alt
 - Write for humans, not commit tooling.
 - Summarize notable changes, not every internal edit.
 - Prefer concise bullets that describe the user-visible result.
+- Add release-summary prose when a release meaningfully changes scope, package surface, or migration burden.
+- Add migration notes when users need follow-up steps after upgrade.
 - Keep the file in English for this skill.
 
 ## Compare Links
 
 - Footer links are optional but common.
 - Reuse existing footer-reference style when the file already has it.
-- Update compare links only when the repository URL and tag pattern are safely derivable.
+- Create or repair footer links only when the repository URL and tag pattern are safely derivable.
 - If the tag pattern is ambiguous, keep the footer unchanged and report the omission.
 
 ## Safe Normalization Rules For This Skill
@@ -44,7 +46,10 @@ The writer script may create or repair these cases automatically:
 - Missing root `CHANGELOG.md`
 - Missing `## [Unreleased]`
 - Missing canonical level-3 headings in the target section
+- Duplicate bullets in a target section
+- Empty category headings created by mutation
 - Missing footer links when the compare strategy is safely derivable
+- `YANKED` markers on explicit target versions
 
 The writer script must stop instead of guessing when it sees:
 

@@ -1,6 +1,6 @@
 ---
 name: keep-a-changelog
-description: Draft, review, split, and optionally update Keep a Changelog style CHANGELOG.md files using the Keep a Changelog 1.1.0 format. Use when Codex needs to inspect the current git diff, review changelog quality, propose changelog bullets, group repo changes by changelog relevance, or safely manage Unreleased, release, subset-release, or yanked version sections in a repository changelog.
+description: Draft, review, split, and optionally update Keep a Changelog style CHANGELOG.md files using the Keep a Changelog 1.1.0 format. Use when Codex needs to inspect the current git diff, review changelog quality, propose changelog bullets, write release summaries or migration notes, group repo changes by changelog relevance, or safely manage Unreleased, release, subset-release, or yanked version sections in a repository changelog.
 ---
 
 # Keep a Changelog
@@ -28,13 +28,16 @@ Read [references/quality-and-release-ops.md](references/quality-and-release-ops.
    Use the planner output as the source of truth for groups, notability hints, release support, and quality warnings.
    Read only the diff for one group before drafting bullets for that group.
    Omit `ci`, `tooling`, `test`, and low-signal docs work unless the change is clearly user-visible or release-relevant.
+   Add release summary prose for large or scope-changing releases.
+   Add `Migration notes:` when removals, deprecations, renamed APIs, or upgrade steps may affect users.
+   Group clusters of related fixes into a few themed bullets instead of long flat fix lists.
    Keep all generated prose in English.
 
 4. Review both structure and content quality.
    Check for `## [Unreleased]`.
    Check level-2 version headings for `YYYY-MM-DD` dates.
    Check level-3 category headings against the canonical set.
-   Warn on duplicate bullets, empty headings, empty sections, reverse-order release sections, internal-only wording, and weak user-facing phrasing.
+   Warn on duplicate bullets, empty headings, empty sections, reverse-order release sections, internal-only wording, weak user-facing phrasing, large release sections with no summary prose, removals without migration guidance, over-fragmented fix sections, and missing compare links when they are safely derivable.
    For large or breaking releases, require explicit release summary and migration-note coverage.
 
 5. Execute changelog writes only when the user explicitly asks for an update.
@@ -61,6 +64,8 @@ Read [references/quality-and-release-ops.md](references/quality-and-release-ops.
 - `generic`: default profile; group by broad repo shape without assuming `packages/` or `apps/`
 - `lattice`: explicit profile for the current monorepo conventions and package/app test attachment behavior
 
+Profiles affect diff classification only. Editorial standards such as release summaries, migration notes, grouped fixes, and effect-first wording apply across all profiles.
+
 ## Message Policy
 
 - Prefer user-visible behavior over implementation detail.
@@ -69,6 +74,8 @@ Read [references/quality-and-release-ops.md](references/quality-and-release-ops.
 - Prefer these headings in canonical order: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 - Use release-level summary prose when the release materially changes scope, package surface, or migration requirements.
 - Add migration notes for breaking behavior, package removals, or required follow-up work.
+- Rewrite build, CI, tooling, and maintenance changes around release-visible outcomes such as reliability, stability, compatibility, or upgrade impact when they deserve inclusion at all.
+- Compress repetitive fix bullets into a few stronger themes when a flat list becomes hard to scan.
 - Mention `YANKED` only when the changelog already uses it or the user explicitly asks for it.
 - Keep all skill output and generated changelog text in English.
 
@@ -101,10 +108,10 @@ Use these response shapes:
   `### Added`
   `- Add keyboard navigation for the menu trigger.`
 - Large release:
-  `## [0.4.0] - 2026-03-20`
-  `This release narrows the published package surface and removes preview-only packages.`
+  `## [2.3.0] - 2026-03-20`
+  `This release improves upgrade reliability, removes deprecated entrypoints, and simplifies the supported surface area.`
   `Migration notes:`
-  `- Replace preview imports with the stable package entrypoints.`
+  `- Replace deprecated imports with the stable entrypoints before upgrading.`
 - Review existing changelog:
   `Non-conforming: missing ## [Unreleased] section.`
   `Quality warning: [1.2.0] bullet under Changed looks internal or low-signal: - Refactor build scripts.`

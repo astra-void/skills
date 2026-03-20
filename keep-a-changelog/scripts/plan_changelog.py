@@ -98,6 +98,38 @@ LOW_SIGNAL_DOC_PATTERNS = (
     "documentation",
     "comment",
 )
+LIKELY_MIGRATION_PATTERNS = (
+    "remove",
+    "removed",
+    "drop",
+    "dropped",
+    "deprecat",
+    "rename",
+    "renamed",
+    "replace",
+    "entrypoint",
+    "entry point",
+    "import",
+    "api",
+    "command",
+    "flag",
+    "option",
+    "package",
+    "app",
+    "module",
+    "behavior",
+)
+EFFECT_ORIENTED_PATTERNS = (
+    "reliab",
+    "stabil",
+    "faster",
+    "perform",
+    "compatib",
+    "upgrade",
+    "user",
+    "increment",
+    "predictab",
+)
 
 SECTION_RE = re.compile(
     r"^## \[(?P<title>[^\]]+)\](?: - (?P<date>\d{4}-\d{2}-\d{2}))?(?P<yanked> \[YANKED\])?$"
@@ -487,16 +519,72 @@ def analyze_bullet_quality(section: Section, category: str, line: str) -> list[s
         )
     if len(bullet.split()) <= 3:
         warnings.append(f"[{section.title}] bullet under {category} is too terse to explain user impact: {line.strip()}")
+    if any(token in bullet for token in ("build", "ci", "tooling", "cache", "pipeline", "workflow")) and not any(
+        token in bullet for token in EFFECT_ORIENTED_PATTERNS
+    ):
+        warnings.append(
+            f"[{section.title}] bullet under {category} may need effect-first wording instead of implementation detail: {line.strip()}"
+        )
     return warnings
 
 
-def collect_quality_warnings(document: ChangelogDocument) -> list[str]:
+def has_summary_intro(section: Section) -> bool:
+    for line in section.intro_lines:
+        stripped = line.strip()
+        if not stripped or stripped == "Migration notes:" or stripped.startswith("- "):
+            continue
+        return True
+    return False
+
+
+def has_migration_notes(section: Section) -> bool:
+    return any(line.strip() == "Migration notes:" for line in section.intro_lines)
+
+
+def count_non_empty_bullets(section: Section) -> int:
+    return sum(1 for items in section.categories.values() for item in items if item.strip())
+
+
+def likely_needs_migration_notes(section: Section) -> bool:
+    for category in ("Removed", "Deprecated"):
+        for item in section.categories.get(category, []):
+            bullet = normalize_bullet_text(item)
+            if any(token in bullet for token in LIKELY_MIGRATION_PATTERNS):
+                return True
+    return False
+
+
+def collect_compare_link_warnings(document: ChangelogDocument, compare_links: dict[str, object]) -> list[str]:
+    if not compare_links.get("feasible"):
+        return []
+
+    release_sections = [section.title for section in document.sections if section.title != "Unreleased"]
+    if not release_sections:
+        return []
+
+    expected_labels = {"Unreleased"}
+    expected_labels.update(release_sections[:-1])
+    missing = [label for label in expected_labels if label not in document.footer_links]
+    if not missing:
+        return []
+
+    return [
+        "Footer compare links are missing or incomplete even though the repository URL and tag pattern appear derivable."
+    ]
+
+
+def collect_quality_warnings(
+    document: ChangelogDocument,
+    compare_links: dict[str, object] | None = None,
+) -> list[str]:
     warnings: list[str] = []
 
     for section in document.sections:
         has_intro = not is_blank_lines(section.intro_lines)
+        summary_intro = has_summary_intro(section)
         non_empty_categories = 0
         seen_bullets: Counter[str] = Counter()
+        fixed_bullets = 0
 
         for category, items in section.categories.items():
             bullet_lines = [item for item in items if item.strip()]
@@ -505,6 +593,8 @@ def collect_quality_warnings(document: ChangelogDocument) -> list[str]:
                 continue
 
             non_empty_categories += 1
+            if category == "Fixed":
+                fixed_bullets += len(bullet_lines)
             for line in bullet_lines:
                 normalized = normalize_bullet_text(line)
                 if normalized:
@@ -521,6 +611,16 @@ def collect_quality_warnings(document: ChangelogDocument) -> list[str]:
         else:
             if not has_intro and non_empty_categories == 0:
                 warnings.append(f"[{section.title}] is an empty release section.")
+            bullet_count = count_non_empty_bullets(section)
+            if bullet_count >= 5 and not summary_intro:
+                warnings.append(f"[{section.title}] is a large release section without summary prose.")
+            if likely_needs_migration_notes(section) and not has_migration_notes(section):
+                warnings.append(f"[{section.title}] includes removals or deprecations that likely need migration notes.")
+            if fixed_bullets >= 5:
+                warnings.append(f"[{section.title}] has a long Fixed section that may read better when grouped into themes.")
+
+    if compare_links is not None:
+        warnings.extend(collect_compare_link_warnings(document, compare_links))
 
     return warnings
 
@@ -853,7 +953,7 @@ def build_plan(
         document = ChangelogDocument([], [], OrderedDict(), [], ["Missing [Unreleased] section."])
 
     compare_links = infer_compare_links(repo, document)
-    quality_warnings = sorted(set(collect_quality_warnings(document)))
+    quality_warnings = sorted(set(collect_quality_warnings(document, compare_links)))
     groups = [group.to_dict() for group in groups_by_key.values()]
     groups.sort(key=lambda group: (CATEGORY_ORDER.get(str(group["category"]), 99), str(group["domain_key"])))
     warnings.update(document.warnings)
